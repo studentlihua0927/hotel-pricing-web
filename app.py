@@ -1,48 +1,61 @@
-# hotel_pricing_app_with_new_hotel.py
 import streamlit as st
+import pandas as pd
+import numpy as np
 import datetime
+from xgboost import XGBRegressor
+import joblib
 
-from model import predict_price
+# ---------------- 模拟模型加载（后期改为 joblib.load） ----------------
+@st.cache_data
 
-# 设置页面
-st.set_page_config(page_title="酒店收益最大化定价系统", layout="wide")
+def load_model():
+    model = XGBRegressor()
+    model.load_model("hp_xgb_model.json")  # 后期导出模型用 joblib.dump(model, "hp_model.pkl")
+    return model
 
-# 页面头部 Logo 与介绍
-st.image("https://yourdomain.com/logo.png", width=100)
-st.title("🏨 酒店收益最大化定价系统")
-st.markdown("""
-欢迎使用酒店智能定价助手！该系统可基于历史数据、节假日与市场策略，预测最优房价，实现收益最大化。
-""")
+# ---------------- 定义推荐定价函数 ----------------
+def recommend_price(date_str, model, cost=0):
+    dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    day = dt.day
+    is_weekend = 1 if dt.weekday() >= 5 else 0
+    is_holiday = 1 if date_str in ["2025-05-01", "2025-06-01"] else 0
 
-# 假设已有的酒店与房型信息
-hotels = {
-    "希尔顿欢朋": ["大床房", "双床房", "套房"],
-    "麦客达": ["大床房", "景观房"],
-    "菲伦": ["标准间", "湖景大床房"]
-}
+    price_range = np.arange(300, 801, 5)
+    results = []
 
-# 功能：新建酒店
-with st.sidebar.expander("➕ 新建酒店"):
-    if st.checkbox("启用自定义酒店"):
-        custom_hotel = st.text_input("请输入新酒店名称")
-        custom_room_type = st.text_input("请输入新房型（如双床房）")
-        if custom_hotel and custom_room_type:
-            hotels[custom_hotel] = [custom_room_type]
-            st.success(f"已添加酒店：{custom_hotel}，房型：{custom_room_type}")
+    for p in price_range:
+        X = np.array([[p, day, is_weekend, is_holiday]])
+        occ = model.predict(X)[0]
+        occ = min(max(occ, 0), 1)
+        revenue = occ * (p - cost)
+        results.append((p, occ, revenue))
 
-# 用户输入模块
-hotel = st.sidebar.selectbox("选择酒店", list(hotels.keys()))
-room_type = st.sidebar.selectbox("房型", hotels[hotel])
-date = st.sidebar.date_input("入住日期", datetime.date.today())
-holiday = st.sidebar.checkbox("是否为节假日")
+    df_result = pd.DataFrame(results, columns=["房价", "预测入住率", "预测利润"])
+    best_row = df_result.loc[df_result["预测利润"].idxmax()]
+    best_price = best_row["房价"]
+    best_range = df_result[df_result["预测利润"] >= df_result["预测利润"].max() * 0.95]["房价"]
 
-# 成本设置
-st.sidebar.markdown("---")
-st.sidebar.markdown("**可选：自定义成本设置**")
-cost = st.sidebar.number_input("单间房服务成本（元）", value=80)
-ota_cut = st.sidebar.slider("OTA 抽成比率", 0.05, 0.3, value=0.15)
+    return df_result, best_price, best_range.min(), best_range.max()
 
-# 预测按钮
-if st.button("🎯 生成建议定价"):
-    price = predict_price(hotel, room_type, date, holiday, cost, ota_cut)
-    st.success(f"📊 建议定价：￥{price:.2f}")
+# ---------------- 网页界面 ----------------
+st.title("智能酒店定价推荐系统")
+
+# 用户输入区域
+hotel = st.selectbox("请选择酒店", ["欢朋酒店", "菲伦酒店", "温德姆酒店"])
+room = st.selectbox("请选择房型", ["舒适大床房", "高级大床房", "舒适双床房", "高级双床房", "豪华湖景双床房", "豪华湖景大床房", "欢朋套房"])
+date = st.date_input("请选择入住日期", value=datetime.date(2025, 6, 2))
+cost = st.number_input("请输入单间成本（可选）", value=0, step=10)
+
+if st.button("生成推荐定价"):
+    model = load_model()
+    df, best_price, low, high = recommend_price(str(date), model, cost)
+
+    st.success(f"推荐定价为：¥{best_price:.0f}，推荐区间：¥{low:.0f} ~ ¥{high:.0f}")
+
+    st.line_chart(df.set_index("房价")["预测利润"], use_container_width=True)
+    st.line_chart(df.set_index("房价")["预测入住率"], use_container_width=True)
+
+    with st.expander("查看全部计算数据"):
+        st.dataframe(df)
+
+st.caption("© 酒店智能定价系统 V1")

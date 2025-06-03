@@ -1,67 +1,48 @@
-import joblib
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
 
-MODEL_PATH = "model_grown_from_month_data.pkl"
+# 1. 加载数据（请将路径替换为你本地的 Excel 文件）
+df = pd.read_excel("梅溪半岛三家酒店日营业状况对照表（25.5）.xlsx")
 
-# 模型加载
-try:
-    model = joblib.load(MODEL_PATH)
-except:
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
+# 2. 仅选择欢朋酒店数据 + "舒适大床房" 为例
+hp_room = df[(df["酒店名称"] == "欢朋酒店") & (df["房型"] == "舒适大床房")].copy()
 
-# 成本基准（可通过网页传入自定义）
-BASE_COSTS = {
-    "大床房": 120,
-    "双床房": 135,
-    "湖景房": 160,
-    "套房": 300
+# 3. 添加节假日、是否周末、日期等基本特征
+holiday_dates = ["2025-05-01", "2025-06-01"]
+hp_room["日期"] = pd.to_datetime(hp_room["日期"])
+hp_room["day"] = hp_room["日期"].dt.day
+hp_room["is_weekend"] = hp_room["日期"].dt.weekday >= 5
+hp_room["is_weekend"] = hp_room["is_weekend"].astype(int)
+hp_room["is_holiday"] = hp_room["日期"].astype(str).isin(holiday_dates).astype(int)
+
+# 4. 构造模拟入住率（根据房型热度 + 噪声）
+heat_coefs = {
+    "舒适大床房": 1.10,
+    "高级大床房": 1.08,
+    "舒适双床房": 1.05,
+    "高级双床房": 1.00,
+    "豪华湖景双床房": 0.90,
+    "豪华湖景大床房": 0.85,
+    "欢朋套房": 0.80
 }
-DEFAULT_OTA_CUT = 0.15
+np.random.seed(42)
+base_occ = hp_room["入住率"]
+noise = np.random.normal(loc=1.0, scale=0.05, size=len(base_occ))
+coef = heat_coefs["舒适大床房"]
+hp_room["模拟入住率"] = np.clip(base_occ * coef * noise, 0, 1)
 
-def predict_price(hotel, room_type, date, holiday=False, custom_cost=None, ota_cut=None):
-    """
-    主力函数：根据酒店、房型、时间等预测最优定价
-    """
-    base_rate = 0.9 if not holiday else 0.97
-    sensitivity = 0.0015 if not holiday else 0.002
+# 5. 准备模型训练数据
+X = hp_room[["模拟房价", "day", "is_weekend", "is_holiday"]]
+y = hp_room["模拟入住率"]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    cost = custom_cost if custom_cost is not None else BASE_COSTS.get(room_type, 140)
-    cut = ota_cut if ota_cut is not None else DEFAULT_OTA_CUT
+# 6. 模型训练
+model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=4, random_state=42)
+model.fit(X_train, y_train)
 
-    best_profit = -1
-    best_price = 300  # 初始参考起点
-    price_range = range(180, 801, 5)  # 搜索价格空间
+# 7. 保存模型
+model.save_model("hp_xgb_model.json")
 
-    for p in price_range:
-        # 预测入住率 r
-        feature = [[hotel, room_type, date.month, p]]
-        try:
-            r = model.predict(feature)[0]
-        except:
-            r = base_rate - sensitivity * (p - 200)
-        profit = r * (p * (1 - cut) - cost)
-        if profit > best_profit:
-            best_profit = profit
-            best_price = p
-
-             return best_price
-
-def retrain_model_from_excel(file_path, sheet_name=None):
-    """
-    用新数据更新模型
-    """
-    df = pd.read_excel(file_path, sheet_name=sheet_name)
-    df = df.dropna(subset=['hotel', 'room_type', 'month', 'price', 'occupancy_rate'])
-
-    X = df[['hotel', 'room_type', 'month', 'price']].values
-    y = df['occupancy_rate'].values
-
-    model_new = RandomForestRegressor(n_estimators=100, random_state=42)
-    model_new.fit(X, y)
-    joblib.dump(model_new, MODEL_PATH)
-    return "模型已根据新数据更新。"
-
-
-
+print("模型训练完成并已保存为 hp_xgb_model.json")
